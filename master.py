@@ -236,7 +236,7 @@ import numpy as np
 
 #Split line for me to play aroud master workers set up
 # ----------------------------------------------------------------------------------------
-num_return_sequences = 5 
+num_return_sequences =1
 max_length = 30 
 
 # Socket communication functions
@@ -286,6 +286,15 @@ tokens = torch.tensor(tokens, dtype=torch.long)  # After get tokens, create a to
 # Replicate these tokens as we plan to run it 5 times
 tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)  # (5,8) Find 9th token
 
+
+def deserialize(num_return_sequences,final_x):
+    # Decode and print results
+    for i in range(num_return_sequences):
+        tokens_list = final_x[i, :].tolist()
+        decoded = enc.decode(tokens_list)
+        print(">", decoded)
+    return decoded
+
 if mode == 'master':
     print("Running in master mode...")
     
@@ -332,15 +341,13 @@ if mode == 'master':
     send_tensor(sock, x.cpu())  # Send CPU tensor to avoid GPU memory issues
     
     # Receive completed tokens from worker
-    print("Waiting for worker to complete generation...")
+    print("Waiting for worker...")
     final_x = receive_tensor(sock)
     sock.close()
     
-    # Decode and print results
-    for i in range(num_return_sequences):
-        tokens_list = final_x[i, :].tolist()
-        decoded = enc.decode(tokens_list)
-        print(">", decoded)
+    print("Work done,overall:")
+    print(deserialize(num_return_sequences,final_x))
+
 
 elif mode == 'worker':
     print("Running in worker mode...")
@@ -362,11 +369,14 @@ elif mode == 'worker':
     
     # Receive tokens from master
     print("Receiving tokens from master...")
+     
     x = receive_tensor(conn)
     x = x.to('cuda')
-    
+    x_before = x # write the tensor to record
     initial_len = x.size(1)
-    print(f"Received sequence with {initial_len} tokens, continuing generation...")
+    
+    print(f"Received sequence with {initial_len} tokens")
+    print("Start from>>>"+deserialize(num_return_sequences,x)+ "<<<\n")
     
     # Continue generating up to max_length
     torch.manual_seed(42)  # Use same seed for reproducibility
@@ -392,7 +402,10 @@ elif mode == 'worker':
     print(f"Worker generated {new_tokens} additional tokens")
     
     # Send completed tokens back to master
-    print("Sending completed sequence back to master...")
+    print("vvv Work done!! vvv\n")
+    deserialize(num_return_sequences,x) # Print the current have
+    print("^^^ Sending  back to master ^^^\n")
+    
     send_tensor(conn, x.cpu())
     conn.close()
     server_socket.close()

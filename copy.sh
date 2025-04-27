@@ -1,4 +1,4 @@
-#scp -r ./master.py  dourlin@192.168.1.70:/home/dourlin/Develop/Edgerunner
+#scp -r ./master.py  dourlin@latte:/home/dourlin/Develop/Edgerunner
 
 current_time=$(date +"%Y-%m-%d %H:%M:%S")
 echo $current_time
