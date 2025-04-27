@@ -306,7 +306,8 @@ if mode == 'master':
     # First generation phase on master
     while x.size(1) < tokens.size(1) + first_half:  # Generate first_half new tokens
         with torch.no_grad():
-            logits, _ = model(x)  # Fixed: unpack tuple
+            logits = model(x)  # Fixed: unpack tuple
+            #logits, _ = model(x)  # Fixed: unpack tuple
             logits = logits[:, -1, :]  # (B : vocab_size), take the logits at the last position
             
             probs = F.softmax(logits, dim=-1)  # Last logit pass through softmax get probability
@@ -373,7 +374,8 @@ elif mode == 'worker':
     
     while x.size(1) < initial_len + max_length - (initial_len - tokens.size(1)):
         with torch.no_grad():
-            logits, _ = model(x)  # Fixed: unpack tuple
+            logits = model(x)  # Fixed: unpack tuple
+            #logits, _ = model(x)  # Fixed: unpack tuple
             logits = logits[:, -1, :]
             
             probs = F.softmax(logits, dim=-1)
