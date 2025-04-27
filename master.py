@@ -7,6 +7,14 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 #from hellaswag import render_example, iterate_examples
+#----
+import socket
+import pickle
+import sys
+
+
+
+
 # -----------------------------------------------------------------------------
 
 class CausalSelfAttention(nn.Module):
@@ -224,47 +232,169 @@ model.to('cuda')
 import tiktoken
 import numpy as np
 
+
+
+#Split line for me to play aroud master workers set up
+# ----------------------------------------------------------------------------------------
+num_return_sequences = 5 
+max_length = 30 
+
+# Socket communication functions
+def send_tensor(sock, tensor):
+    # Serialize tensor to bytes
+    data = pickle.dumps(tensor)
+    # Send data size first
+    size = len(data)
+    sock.sendall(size.to_bytes(8, byteorder='big'))
+    # Send actual data
+    sock.sendall(data)
+
+def receive_tensor(sock):
+    # Get data size first
+    size_bytes = sock.recv(8)
+    size = int.from_bytes(size_bytes, byteorder='big')
+    # Receive data in chunks
+    data = b''
+    while len(data) < size:
+        chunk = sock.recv(min(size - len(data), 4096))
+        if not chunk:
+            raise RuntimeError("Socket connection broken")
+        data += chunk
+    # Deserialize back to tensor
+    return pickle.loads(data)
+
+# Get execution mode from command line
+if len(sys.argv) < 2:
+    print("Usage: python script.py [master|worker]")
+    sys.exit(1)
+
+mode = sys.argv[1]
+
+# Hard-coded network settings
+MASTER_IP = '192.168.1.80'
+WORKER_IP = '192.168.1.70'
+PORT = 16543
+
+# Common initialization code
+import tiktoken
+import numpy as np
+
 enc = tiktoken.get_encoding('gpt2') # Use gpt2 encoder
 tokens = enc.encode("Hello, I'm a language model,")
-tokens = torch.tensor(tokens, dtype=torch.long)  # After get tokends, creat a torch tensor 
+tokens = torch.tensor(tokens, dtype=torch.long)  # After get tokens, create a torch tensor
 
+# Replicate these tokens as we plan to run it 5 times
+tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)  # (5,8) Find 9th token
 
-#replicate these 8 tokens after we plan to run it 5 times 
-tokens = tokens.unsqueeze(0).repeat(num_return_sequences,1)# (5,8) Find 9th token
+if mode == 'master':
+    print("Running in master mode...")
+    
+    # Load model
+    model = GPT.from_pretrained('gpt2')
+    model.eval()  # put model to evaluation mode so param not change
+    model.to('cuda')
+    
+    # Move tokens to GPU
+    x = tokens.to('cuda')
+    
+    # Generate first half of tokens
+    first_half = max_length // 2
+    
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+    
+    # First generation phase on master
+    while x.size(1) < tokens.size(1) + first_half:  # Generate first_half new tokens
+        with torch.no_grad():
+            logits, _ = model(x)  # Fixed: unpack tuple
+            logits = logits[:, -1, :]  # (B : vocab_size), take the logits at the last position
+            
+            probs = F.softmax(logits, dim=-1)  # Last logit pass through softmax get probability
+            
+            # Do top-k sampling of 50 (hugging face pipeline default)
+            topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+            
+            ix = torch.multinomial(topk_probs, 1)  # (B,1)
+            
+            xcol = torch.gather(topk_indices, -1, ix)  # Gather the corresponding indices
+            x = torch.cat((x, xcol), dim=1)  # Append to the sequence
+    
+    print(f"Master generated {x.size(1) - tokens.size(1)} new tokens")
+    
+    # Connect to worker and send tokens
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    print(f"Connecting to worker at {WORKER_IP}:{PORT}...")
+    sock.connect((WORKER_IP, PORT))
+    
+    # Send current tokens to worker
+    print("Sending tokens to worker...")
+    send_tensor(sock, x.cpu())  # Send CPU tensor to avoid GPU memory issues
+    
+    # Receive completed tokens from worker
+    print("Waiting for worker to complete generation...")
+    final_x = receive_tensor(sock)
+    sock.close()
+    
+    # Decode and print results
+    for i in range(num_return_sequences):
+        tokens_list = final_x[i, :].tolist()
+        decoded = enc.decode(tokens_list)
+        print(">", decoded)
 
-#Just use cpu now
-x = tokens.to('cuda')
+elif mode == 'worker':
+    print("Running in worker mode...")
+    
+    # Load model
+    model = GPT.from_pretrained('gpt2')
+    model.eval()  # put model to evaluation mode so param not change
+    model.to('cuda')
+    
+    # Set up server socket
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind((WORKER_IP, PORT))
+    server_socket.listen(1)
+    
+    print(f"Worker listening on {WORKER_IP}:{PORT}")
+    conn, addr = server_socket.accept()
+    print(f"Connected to master at {addr}")
+    
+    # Receive tokens from master
+    print("Receiving tokens from master...")
+    x = receive_tensor(conn)
+    x = x.to('cuda')
+    
+    initial_len = x.size(1)
+    print(f"Received sequence with {initial_len} tokens, continuing generation...")
+    
+    # Continue generating up to max_length
+    torch.manual_seed(42)  # Use same seed for reproducibility
+    torch.cuda.manual_seed(42)
+    
+    while x.size(1) < initial_len + max_length - (initial_len - tokens.size(1)):
+        with torch.no_grad():
+            logits, _ = model(x)  # Fixed: unpack tuple
+            logits = logits[:, -1, :]
+            
+            probs = F.softmax(logits, dim=-1)
+            
+            # Do top-k sampling of 50
+            topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+            
+            ix = torch.multinomial(topk_probs, 1)
+            
+            xcol = torch.gather(topk_indices, -1, ix)
+            x = torch.cat((x, xcol), dim=1)
+    
+    new_tokens = x.size(1) - initial_len
+    print(f"Worker generated {new_tokens} additional tokens")
+    
+    # Send completed tokens back to master
+    print("Sending completed sequence back to master...")
+    send_tensor(conn, x.cpu())
+    conn.close()
+    server_socket.close()
 
-
-# Generate, now x is (B,T) where B = 5, T = 8
-
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
-while x.size(1) < max_length:
-    #Torch no grad means we are not calling backward on these layers so we don't need to cache intermediate tensors
-    with torch.no_grad():
-        
-        logits = model(x) # (B, T, vocab_size)
-        logits = logits[:, -1, :]# (B : vocab_size), take the logits at the last position, throw other parts
-        print("Round"+str(x.size(1))+"results:"+str(logits)+"\n")
-        probs = F.softmax(logits, dim = -1) #Last logit pass through softmax get probability
-
-        # do top-k sampling of 50 (hugging face pipeline default)
-        #topk_probs here becomes (5,50), top_indicies is (5,50)
-        topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
-
-        ix = torch.multinomial(topk_probs, 1) #(B,1)
-
-        xcol = torch.gather(topk_indices, -1, ix) # gather the corresponding indices
-        x = torch.cat((x,xcol),dim=1) # append to the sequence
-
-
-
-### not to output it yet.
-
-for i in range(num_return_sequences):
-    tokens = x[i, :max_length].tolist()
-    decoded = enc.decode(tokens)
-    print(">",decoded)
-
-        
+else:
+    print("Invalid mode. Use 'master' or 'worker'.")
+    sys.exit(1)
