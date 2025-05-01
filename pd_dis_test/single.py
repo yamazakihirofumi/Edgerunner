@@ -8,7 +8,16 @@ import torch.nn as nn
 from torch.nn import functional as F
 #from hellaswag import render_example, iterate_examples
 # -----------------------------------------------------------------------------
+num_return_sequences = 1 #5 
+max_length = 1024
 
+text_input = ""
+with open('./text2.txt', 'r', encoding='utf-8') as file:
+            text_input = file.read().strip()
+
+print("The input text are "+ text_input)
+
+# -----------------------------------------------------------------------------
 class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
@@ -209,12 +218,11 @@ class GPT(nn.Module):
 
 
 # ----------------------------------------------------------------------------------------
-num_return_sequences = 1 #5 
-max_length = 2048
+
 
 model = GPT.from_pretrained('gpt2')
 model.eval() # put model to evaluation model so param not change
-#model.to('cuda')
+model.to('cuda')
 
 
 # ----------------------------------------------------------------------------------------
@@ -223,11 +231,7 @@ import tiktoken
 import numpy as np
 
 
-text_input = ""
-with open('./text.txt', 'r', encoding='utf-8') as file:
-            text_input = file.read().strip()
 
-print("The input text are "+ text_input)
 
 
 enc = tiktoken.get_encoding('gpt2') # Use gpt2 encoder
@@ -239,8 +243,8 @@ tokens = torch.tensor(tokens, dtype=torch.long)  # After get tokends, creat a to
 tokens = tokens.unsqueeze(0).repeat(num_return_sequences,1)# (5,8) Find 9th token
 
 
-#x = tokens.to('cuda')
-x = tokens.to('cpu')
+x = tokens.to('cuda')
+#x = tokens.to('cpu')
 
 
 # Generate, now x is (B,T) where B = 5, T = 8
@@ -277,16 +281,17 @@ while x.size(1) < max_length:
         ix = torch.multinomial(topk_probs, 1)
         xcol = torch.gather(topk_indices, -1, ix)
         x = torch.cat((x, xcol), dim=1)
-        last_token = xcol[0].item()  # Assuming batch size 1 or showing first sequence in batch
-        last_token_decoded = enc.decode([last_token])
-        print(f"Decode{x.size(1) - input_length}, value: '{last_token_decoded}'")
+        #last_token = xcol[0].item()  # Assuming batch size 1 or showing first sequence in batch
+        #last_token_decoded = enc.decode([last_token])
+        #print(f"Decode{x.size(1) - input_length}, value: '{last_token_decoded}'")
 
 time_d_end = time.time()
-print(f"The decode stage takes {time_d_end-time_d_start:.4f} \n")
+
+
 
 for i in range(num_return_sequences):
     tokens = x[i, :max_length].tolist()
     decoded = enc.decode(tokens)
     print(">",decoded)
 
-        
+print(f"###The decode stage takes {time_d_end-time_d_start:.4f} \n")
