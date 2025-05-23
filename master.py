@@ -376,7 +376,7 @@ elif mode == 'worker':
     initial_len = x.size(1)
     
     print(f"Received sequence with {initial_len} tokens")
-    print("Start from>>>"+deserialize(num_return_sequences,x)+ "<<<\n")
+    print("Start from>>>\n"+deserialize(num_return_sequences,x)+ "\n<<<\n")
     
     # Continue generating up to max_length
     torch.manual_seed(42)  # Use same seed for reproducibility
@@ -402,7 +402,7 @@ elif mode == 'worker':
     print(f"Worker generated {new_tokens} additional tokens")
     
     # Send completed tokens back to master
-    print("vvv Work done!! vvv\n")
+    print("vvv[Master:] Work done!! vvv\n")
     deserialize(num_return_sequences,x) # Print the current have
     print("^^^ Sending  back to master ^^^\n")
     
