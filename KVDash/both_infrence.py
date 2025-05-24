@@ -6,13 +6,21 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, DynamicCache
 import threading
 from queue import Queue
 
-class GPUPrefillServer:
-    """GPU server handles prefill requests and returns KV cache"""
+class PrefillServer:
     
-    def __init__(self, model_id, port=5555):
+    def __init__(self, model_id, prefill_device,port=5555):
         self.model_id = model_id
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        if prefill_device != "cuda" and prefill_device != "cpu":
+            print(f"!!!! Expecting device CPU or CUDA/GPU here got {prefill_device}")
+            return
+        self.device = prefill_device
+        if self.device == "cuda":
+            if not torch.cuda.is_available():
+                print(f"!!!! CUDA is not available")
+                return
         print("####The device is "+ str(self.device))
+
+
         self.port = port
         
         # Load model once on GPU
@@ -27,7 +35,7 @@ class GPUPrefillServer:
         # Setup ZeroMQ
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.REP)
-        self.socket.bind(f"tcp://*:{port}")
+        self.socket.bind(f"tcp://*:{self.port}")  # Use self.port instead of port
         
     def serialize_kv_cache(self, past_key_values):
         """Efficiently serialize KV cache for network transfer"""
@@ -85,7 +93,7 @@ class GPUPrefillServer:
     
     def run_server(self):
         """Main server loop"""
-        print(f"GPU Prefill Server listening on port {self.port}")
+        print(f" Prefill Server listening on port {self.port}")
         
         while True:
             # Wait for request
@@ -101,10 +109,10 @@ class GPUPrefillServer:
 class CPUDecodeServer:
     """CPU server handles decode requests using received KV cache"""
     
-    def __init__(self, model_id, gpu_server_address="tcp://localhost:5555"):
+    def __init__(self, model_id, prefill_server_address="tcp://localhost:5555"):
         self.model_id = model_id
         self.device = "cpu"
-        self.gpu_server_address = gpu_server_address
+        self.prefill_server_address = prefill_server_address
         
         # Load model on CPU
         print(f"Loading model on {self.device} for decode...")
@@ -118,7 +126,7 @@ class CPUDecodeServer:
         # Setup ZeroMQ client
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.REQ)
-        self.socket.connect(gpu_server_address)
+        self.socket.connect(prefill_server_address)
         
     def deserialize_kv_cache(self, serialized_kv):
         """Deserialize KV cache from network transfer"""
@@ -189,24 +197,29 @@ class CPUDecodeServer:
         generated_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
         
         # Calculate metrics
-        metrics = self.calculate_metrics(timestamps, prefill_result["timestamps"], 
-                                       len(generated_tokens), total_decode_time)
+        metrics = self.calculate_metrics(
+            timestamps, 
+            prefill_result["timestamps"], 
+            len(generated_tokens), 
+            total_decode_time, 
+            prefill_result.get("device")
+        )
         
         return {
-            "generated_text": prompt + generated_text,
+            "generated_text": generated_text,
             "metrics": metrics,
             "timestamps": timestamps
         }
     
-    def calculate_metrics(self, decode_timestamps, prefill_timestamps, num_tokens, total_decode_time):
+    def calculate_metrics(self, decode_timestamps, prefill_timestamps, num_tokens, total_decode_time, prefill_device):
         """Calculate end-to-end performance metrics"""
         
         # Prefill metrics (from GPU server)
-        ttft_gpu = prefill_timestamps["prefill_end"] - prefill_timestamps["prefill_start"]
+        ttft_prefill = prefill_timestamps["prefill_end"] - prefill_timestamps["prefill_start"]
         serialization_time = prefill_timestamps["serialize_end"] - prefill_timestamps["serialize_start"]
         
         # Network + deserialization
-        network_time = decode_timestamps["prefill_received"] - decode_timestamps["request_start"] - ttft_gpu
+        network_time = decode_timestamps["prefill_received"] - decode_timestamps["request_start"] - ttft_prefill
         deserialization_time = decode_timestamps["deserialize_end"] - decode_timestamps["deserialize_start"]
         
         # Decode metrics
@@ -217,7 +230,8 @@ class CPUDecodeServer:
         e2e_time = decode_timestamps["decode_end"] - decode_timestamps["request_start"]
         
         return {
-            "ttft_gpu": ttft_gpu,
+            "device": prefill_device,
+            "ttft_prefill": ttft_prefill,
             "serialization_time": serialization_time,
             "network_transfer_time": network_time,
             "deserialization_time": deserialization_time,
@@ -240,12 +254,15 @@ def get_prompt() -> str:
     return prompt
 
 # Example usage
-def run_experiment():
-    model_id = "/home/dourlin/Develop/Model_repo/Mistral-7B-v0.1"
+def run_experiment(prefill_device):
+    #model_id = "/home/dourlin/Develop/Model_repo/Mistral-7B-v0.1"
+    model_id = "/home/dourlin/Develop/Model_repo/Qwen2.5-3B"
+    
     
     # Start GPU server in background (in production, this would be separate process/machine)
-    gpu_server = GPUPrefillServer(model_id)
-    server_thread = threading.Thread(target=gpu_server.run_server, daemon=True)
+
+    prefill_server = PrefillServer(model_id,prefill_device)
+    server_thread = threading.Thread(target=prefill_server.run_server, daemon=True)
     server_thread.start()
     
     time.sleep(2)  # Give server time to start
@@ -269,4 +286,4 @@ def run_experiment():
             print(f"{key}: {value}")
 
 if __name__ == "__main__":
-    run_experiment()
+    run_experiment("cuda")
